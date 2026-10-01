@@ -425,6 +425,28 @@ describe('one-click AI readings in the detailed mode', () => {
 });
 
 describe('the new-task form', () => {
+  it('submits a timed image sequence with the song', async () => {
+    seed();
+    const api = mockApi({ 'POST /api/tasks': () => task({ id: 'slides', status: 'preparing' }) });
+    const { container } = renderUI(<SimpleHome />);
+    await userEvent.click(screen.getByRole('radio', { name: '音频 + 背景' }));
+    await userEvent.click(screen.getByRole('radio', { name: '多图定时切换' }));
+    await userEvent.upload(container.querySelector('input[type=file]') as HTMLInputElement,
+      new File(['song'], 'song.mp3', { type: 'audio/mpeg' }));
+    await userEvent.upload(screen.getByLabelText('选择多张背景图片'),
+      ['a.png', 'b.png', 'c.png'].map((name) => new File(['png'], name, { type: 'image/png' })));
+    fireEvent.change(screen.getByLabelText('第 2 张开始时间'), { target: { value: '01:10' } });
+    fireEvent.change(screen.getByRole('textbox', { name: '音乐链接或歌词' }), { target: { value: 'きみと' } });
+    await userEvent.click(screen.getByRole('button', { name: /开始制作/ }));
+    await waitFor(() => expect(api.find('POST', '/api/tasks')).toHaveLength(1));
+    const fd = api.find('POST', '/api/tasks')[0].body as FormData;
+    expect((fd.getAll('background_images') as File[]).map((f) => f.name)).toEqual(['a.png', 'b.png', 'c.png']);
+    expect(JSON.parse(String(fd.get('background_starts')))).toEqual([0, 70000, 120000]);
+    expect(fd.get('background')).toBeNull();
+    await userEvent.click(screen.getByRole('radio', { name: '单张图片 / 视频' }));
+    await userEvent.click(screen.getByRole('radio', { name: '视频' }));
+  });
+
   it('sends the audio with a background picture, and keeps the background for the next song', async () => {
     seed();
     const api = mockApi({ 'GET /api/tasks': () => [], 'POST /api/tasks': () => task({ id: 'tb', status: 'preparing' }) });

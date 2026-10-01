@@ -201,6 +201,20 @@ range, NaN or not a number is refused with 400 (before a job starts).
 
 Mix rule (same in browser and export): `mix = master × (p/100·V + q/100·I)`; bus gain `min(1, 10^(-0.3/20)/peak)` when `limiter = normalize_peak`. Browser playback computes it with GainNodes; only the export applies a precomputed bus gain from the full-file peak (the UI shows the same number from `/mix/preview-gain`).
 
+## Timed background images
+
+`PUT /api/projects/{pid}/background/slides` saves a slideshow (multipart):
+
+- `files`: zero or more image uploads (PNG / JPG / WebP / BMP, each ≤ 30 MiB).
+- `timeline`: a JSON array such as `[{"upload_index":0,"start_ms":0},{"upload_index":1,"start_ms":60000},{"upload_index":2,"start_ms":120000}]`.
+- To reuse a saved image, use `asset_id` instead of `upload_index`. The ID must belong to the project's current slideshow or single background. Each entry specifies exactly one of these references.
+
+The original audio must already exist. There must be 1–100 slides, starting at 0, with strictly increasing integer millisecond times before the song ends. The last slide lasts until the end of the song. The entire video uses the first image's aspect ratio (long side 1920 px); subsequent images are centred and cropped to cover it. Export switches at the first 30 fps frame at or after the specified time.
+
+Returns `ProjectView`, with `project.background_slides: [{asset: BackgroundAsset, start_ms}]`. `view.picture.slides_count` and `slides_key` identify the current timeline for preview refresh. Preview and burn use it with `background: "auto"`; `"black"` bypasses it. Changing backgrounds leaves alignment results intact. `GET /api/projects/{pid}/background/file?asset_id=...` returns a slide image. `DELETE /api/projects/{pid}/background` clears all slides; uploading a single background or using a song cover also replaces the slideshow. Project packages with media include all background images.
+
+For `POST /api/tasks`, send repeated multipart `background_images` files and `background_starts` as a JSON array (e.g. `[0,60000,120000]`), instead of `background`. These are validated and saved with the task, including across restarts. The returned task includes `background_slides: [{filename, start_ms}]`.
+
 ## Exported files
 
 | Method | Path | Response |

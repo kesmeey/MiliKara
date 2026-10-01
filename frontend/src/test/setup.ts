@@ -1,5 +1,11 @@
 import '@testing-library/jest-dom/vitest';
-import { afterEach, vi } from 'vitest';
+import { afterEach, beforeEach, vi } from 'vitest';
+
+// Blob URLs and media metadata are browser services; jsdom does not load media from them.
+beforeEach(() => {
+  vi.spyOn(URL, 'createObjectURL').mockImplementation(() => `blob:test-${Math.random()}`);
+  vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined);
+});
 import { cleanup } from '@testing-library/react';
 
 afterEach(() => {

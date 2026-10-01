@@ -627,6 +627,19 @@ class BackgroundAsset(_Base):
     duration_ms: Optional[int] = None  # video only
 
 
+class BackgroundSlide(_Base):
+    """A still image from start_ms until the next slide (or the end of the song)."""
+
+    asset: BackgroundAsset
+    start_ms: int = Field(ge=0, strict=True)
+
+    @model_validator(mode="after")
+    def image_only(self):
+        if self.asset.kind != "image":
+            raise ValueError("多图背景只支持静态图片")
+        return self
+
+
 # ---------------------------------------------------------------------------
 # Karaoke subtitle style (ASS). Pixel values are defined for a frame 1920 px wide
 # and scaled by the actual video width (same share of the width at any resolution).
@@ -1113,9 +1126,17 @@ class Project(_Base):
     video: Optional[VideoAsset] = None
     # shown behind the subtitles instead of the video (or of black) when set
     background: Optional[BackgroundAsset] = None
+    background_slides: list[BackgroundSlide] = Field(default_factory=list, max_length=100)
     karaoke: KaraokeStyle = Field(default_factory=KaraokeStyle)
     # the karaoke title card's own text (one line each; the first is the title); None = from the song data
     song_info_text: Optional[str] = None
+
+    @model_validator(mode="after")
+    def ordered_background_slides(self):
+        starts = [s.start_ms for s in self.background_slides]
+        if starts and (starts[0] != 0 or any(a >= b for a, b in zip(starts, starts[1:]))):
+            raise ValueError("背景第一张必须从 00:00 开始，后续时间必须递增")
+        return self
 
     def asset(self, role: str) -> Optional[AudioAsset]:
         for a in self.audio:

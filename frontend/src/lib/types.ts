@@ -200,8 +200,11 @@ export interface BackgroundAsset {
   width: number; height: number; duration_ms: number | null;
 }
 
+export interface BackgroundSlide { asset: BackgroundAsset; start_ms: number }
+
 /** What a burned video shows by default (ProjectView.view.picture). */
 export interface PictureInfo {
+  slides_count?: number; slides_key?: string;
   source: 'background' | 'video' | 'black'; width: number; height: number; kind?: 'image' | 'video'; filename?: string | null;
 }
 
@@ -303,6 +306,7 @@ export interface Project {
   video?: VideoAsset | null;
   /** a picture, or a video played in a loop, shown behind the subtitles instead of the video / black */
   background?: BackgroundAsset | null;
+  background_slides?: BackgroundSlide[];
   karaoke?: KaraokeStyle;
   song_info_text?: string | null;
 }
@@ -529,6 +533,7 @@ export interface PipelineTask {
   id: string; created: string; finished: string | null; name: string; mode: Mode; media_filename: string;
   /** a picture / looped video shown behind the subtitles ('' = none) */
   background_filename?: string;
+  background_slides?: { filename: string; start_ms: number }[];
   lyrics_kind: 'link' | 'text'; lyrics_input: string; status: TaskStatus; project_id: string | null;
   stages: PipelineStage[]; progress: number; message: string; error: string | null; detail: string | null;
   warnings: string[]; outputs: { video?: { filename: string; url: string } };

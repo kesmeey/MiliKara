@@ -898,7 +898,7 @@ def _romaji(project: Project) -> dict[str, str]:
 
 def resolution(project: Project) -> tuple[int, int]:
     """The frame the subtitles are made for: the background's, else the video's, else 1920×1080."""
-    b = project.background
+    b = project.background_slides[0].asset if project.background_slides else project.background
     if b is not None:
         from .background import frame_for
 

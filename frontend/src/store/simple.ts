@@ -3,6 +3,7 @@
 
 import { create } from 'zustand';
 import { api, readableError, uploadWithProgress } from '@/lib/api';
+import { slideTime, timelineError, type SlideDraft } from '@/lib/backgrounds';
 import type { AiProviderInfo, AppSettings, KaraokeStyle, PipelineTask, SettingsPatch, TaskStyleOptions } from '@/lib/types';
 import { loadProjects, openProject, refreshProject, run, setStep, toast, useApp, type Step } from './app';
 
@@ -176,11 +177,20 @@ export function hasActiveTasks(tasks: PipelineTask[]) {
 }
 
 export async function addTask(file: File, lyrics: string, mode: string, name: string, style?: TaskStyleOptions,
-  onProgress?: (f: number) => void, background?: File | null) {
+  onProgress?: (f: number) => void, background?: File | null, slides: SlideDraft[] = []) {
   const fd = new FormData();
   fd.append('file', file, file.name);
   // a picture / video played in a loop behind the subtitles (the file is then usually just the song)
   if (background) fd.append('background', background, background.name);
+  if (slides.length) {
+    const error = timelineError(slides);
+    if (error) throw new Error(error);
+    for (const slide of slides) {
+      if (!slide.file) throw new Error('背景图片缺失，请重新选择');
+      fd.append('background_images', slide.file, slide.file.name);
+    }
+    fd.append('background_starts', JSON.stringify(slides.map((s) => slideTime(s.start))));
+  }
   fd.append('lyrics', lyrics);
   fd.append('mode', mode);
   fd.append('name', name);

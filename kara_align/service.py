@@ -19,7 +19,7 @@ import numpy as np
 from .interfaces import CancelToken, Emission
 from .models import (
     AiRoundtrip, AlignConfig, AlignmentResult, AudioAsset, AudioSource, Issue, LineAnchor, LyricsDoc,
-    BackgroundAsset, MixSettings, Project, SourceSnapshot, VideoAsset, new_id, stable_hash,
+    BackgroundAsset, BackgroundSlide, MixSettings, Project, SourceSnapshot, VideoAsset, new_id, stable_hash,
 )
 from .project import store
 from .project.store import ProjectError
@@ -1305,7 +1305,23 @@ def ensure_upright_video(h: ProjectHandle) -> None:
 def set_background(h: ProjectHandle, src_path: Path, filename: Optional[str] = None) -> BackgroundAsset:
     """Use a picture or a video (looped) behind the subtitles (kara_align.karaoke.background).
     Checked before anything changes; stored content-addressed like the other assets."""
-    from .audio.io import file_sha256
+    bg = _import_background(h, src_path, filename)
+    with h.lock:
+        old = _background_paths(h)
+        h.project.background = bg
+        h.project.background_slides = []
+        h.save()
+        drop_replaced(h, old)
+    return bg
+
+
+def _background_paths(h: ProjectHandle) -> list[str]:
+    return ([h.project.background.path] if h.project.background else []) + [s.asset.path for s in h.project.background_slides]
+
+
+def _import_background(h: ProjectHandle, src_path: Path, filename: Optional[str] = None,
+                       *, image_only: bool = False) -> BackgroundAsset:
+    from .audio.io import AudioError, file_sha256
     from .karaoke.background import BackgroundError, probe_background, validate_background
 
     src_path = Path(src_path)
@@ -1314,8 +1330,10 @@ def set_background(h: ProjectHandle, src_path: Path, filename: Optional[str] = N
         head = f.read(64)
     try:
         kind = validate_background(name, head, src_path.stat().st_size)
+        if image_only and kind != "image":
+            raise BackgroundError("多图背景只支持静态图片")
         info = probe_background(src_path, kind)
-    except BackgroundError as e:
+    except AudioError as e:
         raise ServiceError(str(e)) from e
     sha = file_sha256(src_path)
     ext = Path(name).suffix.lower()
@@ -1325,13 +1343,52 @@ def set_background(h: ProjectHandle, src_path: Path, filename: Optional[str] = N
         tmp = dest.with_name(f".{dest.name}.part")
         shutil.copyfile(src_path, tmp)
         tmp.replace(dest)
-    bg = BackgroundAsset(sha256=sha, path=f"assets/{dest.name}", filename=name, kind=kind, **info)
+    return BackgroundAsset(sha256=sha, path=f"assets/{dest.name}", filename=name, kind=kind, **info)
+
+
+def set_background_slides(h: ProjectHandle, timeline: list[dict], uploads: list[tuple[Path, str]]) -> None:
+    """Replace the timeline atomically; each entry references an asset_id or an upload_index."""
+    from .karaoke.slideshow import validate_starts
+    from .karaoke.background import BackgroundError
+
+    if not isinstance(timeline, list) or any(not isinstance(s, dict) for s in timeline):
+        raise ServiceError("背景时间表必须是数组")
     with h.lock:
-        old = h.project.background.path if h.project.background is not None else None
-        h.project.background = bg
+        original = h.project.asset("original")
+        if original is None:
+            raise ServiceError("请先上传原曲，再设置背景时间表")
+        try:
+            validate_starts([s.get("start_ms") for s in timeline], original.duration_ms)
+        except BackgroundError as e:
+            raise ServiceError(str(e)) from e
+        known = {s.asset.id: s.asset for s in h.project.background_slides}
+        if h.project.background:
+            known[h.project.background.id] = h.project.background
+        slides = []
+        imported = {}
+        for spec in timeline:
+            aid, index = spec.get("asset_id"), spec.get("upload_index")
+            if (aid is None) == (index is None):
+                raise ServiceError("每张背景必须指定已有图片或上传文件中的一个")
+            if index is not None:
+                if type(index) is not int or not 0 <= index < len(uploads):
+                    raise ServiceError("背景上传文件编号无效")
+                if index not in imported:
+                    imported[index] = _import_background(h, *uploads[index], image_only=True)
+                asset = imported[index]
+            else:
+                asset = known.get(aid) if isinstance(aid, str) else None
+                if asset is None or asset.kind != "image":
+                    raise ServiceError("背景图片不存在，请重新上传")
+            path = store.asset_abspath(h.dir, asset.path)
+            if path is None or not path.is_file():
+                raise ServiceError("背景图片文件缺失，请重新上传")
+            slides.append(BackgroundSlide(asset=asset, start_ms=spec["start_ms"]))
+        old = _background_paths(h)
+        h.project.background = None
+        h.project.background_slides = slides
         h.save()
-        drop_replaced(h, [old])
-    return bg
+        drop_replaced(h, old)
 
 
 def song_source(p: Project) -> Optional[tuple[str, str, Optional[str]]]:
@@ -1377,18 +1434,41 @@ def cover_background(h: ProjectHandle) -> BackgroundAsset:
 def clear_background(h: ProjectHandle) -> None:
     """Back to the video (or black); the file is deleted."""
     with h.lock:
-        old = h.project.background.path if h.project.background is not None else None
+        old = _background_paths(h)
         h.project.background = None
+        h.project.background_slides = []
         h.save()
-        drop_replaced(h, [old])
+        drop_replaced(h, old)
 
 
-def _background_file(h: ProjectHandle) -> Optional[tuple[BackgroundAsset, Path]]:
+def _background_file(h: ProjectHandle, t_ms: int = 0) -> Optional[tuple[BackgroundAsset, Path]]:
     b = h.project.background
+    if h.project.background_slides:
+        b = next(s.asset for s in reversed(h.project.background_slides) if s.start_ms <= max(0, t_ms))
     if b is None:
         return None
     p = store.asset_abspath(h.dir, b.path)
     return (b, p) if p and p.exists() else None
+
+
+def _slideshow_files(h: ProjectHandle) -> Optional[list[tuple[Path, int]]]:
+    if not h.project.background_slides:
+        return None
+    from .karaoke.slideshow import validate_starts
+    from .karaoke.background import BackgroundError
+
+    original = h.project.asset("original")
+    try:
+        validate_starts([s.start_ms for s in h.project.background_slides], original.duration_ms if original else None)
+    except BackgroundError as e:
+        raise ServiceError(str(e)) from e
+    files = []
+    for s in h.project.background_slides:
+        path = store.asset_abspath(h.dir, s.asset.path)
+        if path is None or not path.is_file():
+            raise ServiceError(f"背景图片「{s.asset.filename or s.asset.id}」缺失，请重新上传")
+        files.append((path, s.start_ms))
+    return files
 
 
 def picture(h: ProjectHandle) -> dict:
@@ -1396,6 +1476,11 @@ def picture(h: ProjectHandle) -> dict:
     from .karaoke.ass import resolution
     from .karaoke.render import frame_size
 
+    if h.project.background_slides:
+        w, hh = resolution(h.project)
+        return {"source": "background", "kind": "image", "filename": h.project.background_slides[0].asset.filename,
+                "width": w, "height": hh, "slides_count": len(h.project.background_slides),
+                "slides_key": stable_hash([(s.asset.sha256, s.start_ms) for s in h.project.background_slides])}
     bg = _background_file(h)
     if bg is not None:
         w, hh = resolution(h.project)
@@ -1427,7 +1512,7 @@ def karaoke_ass(h: ProjectHandle, style: Optional[dict] = None, *, for_video: bo
 
     r, k = _karaoke_inputs(h, style)
     # with a background the video's picture is not used: its frame, the audio's timeline
-    video = _video_file(h) if for_video and _background_file(h) is None else None
+    video = _video_file(h) if for_video and not h.project.background_slides and _background_file(h) is None else None
     offset = h.project.video.audio_offset_s * 1000 if video else 0.0
     # laid out for the frame as the video shows it (non-square pixels applied)
     size = frame_size(video, resolution(h.project)) if video else None
@@ -1456,14 +1541,15 @@ def karaoke_preview(h: ProjectHandle, t_ms: int, style: Optional[dict] = None, b
     from .karaoke.render import frame_size
 
     r, k = _karaoke_inputs(h, style)
-    bg = _background_file(h) if background != "black" else None
+    slides = _slideshow_files(h) if background != "black" else None
+    bg = _background_file(h, t_ms) if background != "black" else None
     video = _video_file(h) if background != "black" and bg is None else None
     # the size the video is shown at (non-square pixels applied), like the burn: same layout, no squash
     size = frame_size(video, resolution(h.project)) if video else resolution(h.project)
     text, _ = build_ass(h.project, r, k, size=size)  # audio timeline; the frame is taken at t (+offset)
     off = h.project.video.audio_offset_s if video else 0.0
     return preview_png(text, int(t_ms), size, video=video, audio_offset_s=off,
-                       background=(bg[1], bg[0].kind, bg[0].duration_ms) if bg else None)
+                       background=(bg[1], bg[0].kind, bg[0].duration_ms) if bg else None, slides=slides)
 
 
 def karaoke_burn(h: ProjectHandle, *, background: str = "auto", audio: str = "original", quality: str = "standard",
@@ -1486,6 +1572,7 @@ def karaoke_burn(h: ProjectHandle, *, background: str = "auto", audio: str = "or
     if orig is None:
         raise ServiceError("请先上传原曲")
     # a background (picture / looped video) comes first, then the song's own video, then black
+    slides = _slideshow_files(h) if background != "black" else None
     bg = _background_file(h) if background != "black" else None
     video = _video_file(h) if background != "black" and bg is None else None
     offset_s = h.project.video.audio_offset_s if video else 0.0
@@ -1514,7 +1601,7 @@ def karaoke_burn(h: ProjectHandle, *, background: str = "auto", audio: str = "or
                 audio_file = asset_path(h, orig)
         burn(text, out, size, orig.duration_ms, video=video, audio=audio_file, audio_offset_s=offset_s,
              use_video_audio=use_video_audio, quality=quality, cancel=cancel, progress=progress,
-             background=(bg[1], bg[0].kind) if bg else None)
+             background=(bg[1], bg[0].kind) if bg else None, slides=slides)
     return {"filename": out.name, "warnings": warnings}
 
 

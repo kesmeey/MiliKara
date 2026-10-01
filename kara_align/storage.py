@@ -77,6 +77,7 @@ def referenced(project) -> set[str]:
     for extra in (project.video, getattr(project, "background", None)):
         if extra is not None and extra.path:
             refs.add(extra.path)
+    refs.update(s.asset.path for s in project.background_slides)
     return refs
 
 
@@ -106,6 +107,8 @@ def project_usage(h) -> dict:
         add("media", p.video.path)
     if getattr(p, "background", None) is not None:
         add("background", p.background.path)
+    for slide in p.background_slides:
+        add("background", slide.asset.path)
     exports = []
     ex = h.dir / "exports"
     if ex.is_dir():

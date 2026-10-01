@@ -247,10 +247,15 @@ def export_package(project: Project, project_dir: Path, out_path: Path, include_
     with zipfile.ZipFile(out_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(PROJECT_FILE, project_to_json(project))
         if include_audio:
-            for a in project.audio + ([project.video] if project.video else []):
+            written: set[str] = set()
+            assets = (project.audio + ([project.video] if project.video else [])
+                      + ([project.background] if project.background else [])
+                      + [s.asset for s in project.background_slides])
+            for a in assets:
                 src = asset_abspath(project_dir, a.path)
-                if src and src.exists():
+                if src and src.exists() and src.name not in written:
                     zf.write(src, arcname=str(PurePosixPath("assets") / src.name), compress_type=zipfile.ZIP_STORED)
+                    written.add(src.name)
     return out_path
 
 

@@ -425,7 +425,8 @@ def create_app(root: Optional[Path] = None, jobs: Optional[JobManager] = None,
 
     @app.post("/api/tasks")
     async def add_task(file: UploadFile = File(...), lyrics: str = Form(...), mode: str = Form("lrc"),
-                       name: str = Form(""), style: str = Form(""), background: Optional[UploadFile] = File(None)):
+                       name: str = Form(""), style: str = Form(""), background: Optional[UploadFile] = File(None),
+                       background_images: list[UploadFile] = File(default=[]), background_starts: str = Form("[]")):
         from ..audio.io import AudioError, validate_upload
         from ..pipeline import QueueElsewhere
 
@@ -447,6 +448,27 @@ def create_app(root: Optional[Path] = None, jobs: Optional[JobManager] = None,
             except ValueError as e:
                 raise HTTPException(400, "style 必须是 JSON") from e
             bg_tmp, bg_name = None, ""
+            slides = []
+            if background_images:
+                from ..karaoke.slideshow import validate_starts, MAX_SLIDES
+                from ..karaoke.background import BackgroundError
+
+                if background is not None:
+                    raise HTTPException(400, "单背景和多图背景不能同时提交")
+                try:
+                    starts = json.loads(background_starts)
+                    if not isinstance(starts, list) or len(starts) != len(background_images) or len(starts) > MAX_SLIDES:
+                        raise ValueError()
+                    validate_starts(starts)
+                except (ValueError, BackgroundError):
+                    raise HTTPException(400, "背景时间表无效：每张图需要一个开始时间，从 0 开始并递增") from None
+                for i, image in enumerate(background_images):
+                    name_i = _upload_name(image.filename, "image")
+                    folder = Path(td) / "slides" / str(i)
+                    folder.mkdir(parents=True)
+                    image_path = folder / name_i
+                    await _save_upload(image, image_path, 30 * 1024**2)
+                    slides.append((image_path, name_i, starts[i]))
             if background is not None and (background.filename or "").strip():
                 bg_name = _upload_name(background.filename, "background")
                 (Path(td) / "bg").mkdir()
@@ -455,7 +477,8 @@ def create_app(root: Optional[Path] = None, jobs: Optional[JobManager] = None,
             # moving the upload and resolving the style run in a thread: the server keeps answering
             try:
                 t = await run_in_threadpool(tq.add, media=tmp, filename=fname, lyrics=lyrics, mode=mode, name=name,
-                                            style=opts, background=bg_tmp, background_filename=bg_name)
+                                            style=opts, background=bg_tmp, background_filename=bg_name,
+                                            background_slides=slides)
             except S.ServiceError as e:
                 raise HTTPException(400, _clean(str(e), td, bg_name or fname)) from e
         finally:
@@ -847,6 +870,31 @@ def create_app(root: Optional[Path] = None, jobs: Optional[JobManager] = None,
                 raise HTTPException(400, _clean(str(e), td, name)) from e
         return view(h)
 
+    @app.put("/api/projects/{pid}/background/slides")
+    async def upload_background_slides(pid: str, timeline: str = Form(...), files: list[UploadFile] = File(default=[])):
+        """Save image switches; entries contain start_ms and asset_id or upload_index."""
+        h = handle(pid)
+        not_busy(pid)
+        from ..karaoke.slideshow import MAX_SLIDES
+
+        if len(files) > MAX_SLIDES:
+            raise HTTPException(400, f"最多 {MAX_SLIDES} 张背景图片")
+        try:
+            specs = json.loads(timeline)
+        except ValueError:
+            raise HTTPException(400, "timeline 必须是 JSON 数组") from None
+        with tempfile.TemporaryDirectory() as td:
+            uploads = []
+            for i, file in enumerate(files):
+                name = _upload_name(file.filename, "image")
+                folder = Path(td) / str(i)
+                folder.mkdir()
+                path = folder / name
+                await _save_upload(file, path, 30 * 1024**2)
+                uploads.append((path, name))
+            await run_in_threadpool(S.set_background_slides, h, specs, uploads)
+        return view(h)
+
     @app.post("/api/projects/{pid}/background/cover")
     def background_from_cover(pid: str):
         """The song's cover (from the music link of the lyrics), blurred, as the picture."""
@@ -862,11 +910,15 @@ def create_app(root: Optional[Path] = None, jobs: Optional[JobManager] = None,
         return view(h)
 
     @app.get("/api/projects/{pid}/background/file")
-    def background_file(pid: str):
+    def background_file(pid: str, asset_id: Optional[str] = None):
         from ..project import store
 
         h = handle(pid)
         b = h.project.background
+        if h.project.background_slides:
+            b = next((s.asset for s in h.project.background_slides if asset_id is None or s.asset.id == asset_id), None)
+        elif asset_id is not None and b is not None and b.id != asset_id:
+            b = None
         p = store.asset_abspath(h.dir, b.path) if b is not None else None
         if p is None or not p.exists():
             raise HTTPException(404, "没有背景")

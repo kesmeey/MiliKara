@@ -25,6 +25,9 @@ import { AUDIO_ACCEPT, BACKGROUND_ACCEPT, MEDIA_ACCEPT } from '@/pages/input/Aud
 import { CalibrateDialog } from './CalibrateDialog';
 import { ReadingsDialog } from './ReadingsDialog';
 import { TaskStyleStep } from './TaskStyleStep';
+import { BackgroundTimeline } from '@/components/BackgroundTimeline';
+import { timelineError, type SlideDraft } from '@/lib/backgrounds';
+import { useMediaDuration } from '@/lib/useMediaDuration';
 
 const PROVIDER_LABEL = { manual: '手动（网页聊天）', claude: 'Claude Code', codex: 'Codex', openai: 'API' } as const;
 
@@ -111,6 +114,9 @@ export function SimpleHome() {
   // "video": the video's own picture; "audio": the song's audio + a picture / looped video behind the subtitles
   const [source, setSource] = usePageDraft<'video' | 'audio'>('simple.source', readSource);
   const [background, setBackground] = usePageDraft<File | null>('simple.background', null);
+  const [backgroundMode, setBackgroundMode] = usePageDraft<'single' | 'slides'>('simple.backgroundMode', 'single');
+  const [backgroundSlides, setBackgroundSlides] = usePageDraft<SlideDraft[]>('simple.backgroundSlides', []);
+  const durationMs = useMediaDuration(file);
   const [lyrics, setLyrics] = usePageDraft('simple.lyrics', '');
   const [name, setName] = usePageDraft('simple.name', '');
   const [busy, setBusy] = useState(false);
@@ -172,10 +178,11 @@ export function SimpleHome() {
     setBusy(true);
     try {
       // big files show how far the upload is (small ones are sent at once)
-      const bg = source === 'audio' ? background : null;
-      const progress = file.size + (bg?.size ?? 0) > 8 * 1024 * 1024 ? (f: number) => setUpload(f) : undefined;
+      const bg = source === 'audio' && backgroundMode === 'single' ? background : null;
+      const slides = source === 'audio' && backgroundMode === 'slides' ? backgroundSlides : [];
+      const progress = file.size + (bg?.size ?? 0) + slides.reduce((n, s) => n + (s.file?.size ?? 0), 0) > 8 * 1024 * 1024 ? (f: number) => setUpload(f) : undefined;
       if (progress) setUpload(0);
-      const t = await addTask(file, lyrics, mode, name, styleOpts ?? undefined, progress, bg);
+      const t = await addTask(file, lyrics, mode, name, styleOpts ?? undefined, progress, bg, slides);
       markOwnTask(t.id);
       toast('ok', '已开始', mode === 'lrc' ? '读取视频和歌词后请确认开头位置，之后全部自动完成' : active ? '前面的任务完成后自动继续' : '马上开始');
       setFile(null);  // (the background stays: the next song often uses the same one)
@@ -189,6 +196,7 @@ export function SimpleHome() {
 
   // why “开始制作” cannot be used yet (shown on the button and next to it)
   const blocked = !file ? '先放入视频或音频（第 2 步）'
+    : source === 'audio' && backgroundMode === 'slides' && timelineError(backgroundSlides, durationMs) ? timelineError(backgroundSlides, durationMs)
     : detected.kind === 'empty' ? '先粘贴歌词或音乐链接（第 3 步）'
       : detected.kind === 'badlink' ? (detected.label === COLLECTION ? '这是专辑或歌单链接：请粘贴单曲链接' : '这个链接不能获取歌词：只支持网易云音乐 / QQ 音乐')
         : styleOpts?.source === 'saved' && !styleOpts.saved_id ? '第 4 步选了“保存的预设”，请选择一个预设'
@@ -242,7 +250,11 @@ export function SimpleHome() {
                     <DropZone compact accept={`${AUDIO_ACCEPT},${MEDIA_ACCEPT}`} onFile={setFile} title="拖入音频，也可以点击选择"
                       hint="MP3 / FLAC / M4A / WAV …（放入视频时只用它的声音）" />
                   )}
-                  {background ? (
+                  <Segmented size="sm" label="背景方式" value={backgroundMode} onChange={setBackgroundMode}
+                    options={[{ value: 'single', label: '单张图片 / 视频' }, { value: 'slides', label: '多图定时切换' }]} />
+                  {backgroundMode === 'slides' ? (
+                    <BackgroundTimeline slides={backgroundSlides} onChange={setBackgroundSlides} durationMs={durationMs} disabled={busy} />
+                  ) : background ? (
                     <FileRow file={background} icon={<ImageIcon className="size-5 shrink-0 text-accent" />} onClear={() => setBackground(null)}
                       note={isImage(background) ? '背景图片' : '背景视频 · 循环播放'} />
                   ) : (
@@ -394,7 +406,7 @@ function TaskRow({ task: t, ahead, onCalibrate }: { task: PipelineTask; ahead: n
             )}
           </div>
           <div className="mt-0.5 truncate text-xs text-muted">
-            {t.media_filename}{t.background_filename ? ` + 背景 ${t.background_filename}` : ''} · {t.lyrics_kind === 'link' ? '音乐链接' : '粘贴的歌词'} · {fmtRelative(t.created)}
+            {t.media_filename}{t.background_slides?.length ? ` + ${t.background_slides.length} 张背景图片` : t.background_filename ? ` + 背景 ${t.background_filename}` : ''} · {t.lyrics_kind === 'link' ? '音乐链接' : '粘贴的歌词'} · {fmtRelative(t.created)}
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">

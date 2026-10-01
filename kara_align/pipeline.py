@@ -137,6 +137,11 @@ def task_stages(calibration: str) -> list[Stage]:
     return [Stage(key=k, label=label) for k, label in order]
 
 
+class TaskBackgroundSlide(_Base):
+    filename: str
+    start_ms: int = Field(ge=0, strict=True)
+
+
 class PipelineTask(_Base):
     id: str = Field(default_factory=lambda: new_id("t"))
     created: str = Field(default_factory=utcnow)
@@ -146,6 +151,7 @@ class PipelineTask(_Base):
     media_filename: str = ""
     # a picture / video (looped) shown behind the subtitles instead of the media's own picture
     background_filename: str = ""
+    background_slides: list[TaskBackgroundSlide] = Field(default_factory=list)
     lyrics_kind: Literal["link", "text"] = "text"
     lyrics_input: str = ""
     status: TaskStatus = "queued"
@@ -345,6 +351,9 @@ class TaskQueue:
     def background_path(self, task: PipelineTask) -> Optional[Path]:
         return self.dir / task.id / "background" / task.background_filename if task.background_filename else None
 
+    def slide_path(self, task: PipelineTask, index: int) -> Path:
+        return self.dir / task.id / "background-slides" / str(index) / Path(task.background_slides[index].filename).name
+
     # ---- public API
     def list(self) -> list[dict]:
         self._refresh()
@@ -385,7 +394,7 @@ class TaskQueue:
 
     def add(self, *, media: Path, filename: str, lyrics: str, mode: str, name: str = "",
             style: Optional[dict] = None, background: Optional[Path] = None,
-            background_filename: str = "") -> PipelineTask:
+            background_filename: str = "", background_slides: Optional[list[tuple[Path, str, int]]] = None) -> PipelineTask:
         """``style``: the task's subtitle choices (TaskStyleOptions); None = the last ones used.
         ``background``: a picture or a video (looped) to show behind the subtitles (the media is then
         usually just the song's audio); checked here, before the task is added."""
@@ -409,6 +418,27 @@ class TaskQueue:
         if safe in ("", ".", ".."):
             safe = "media"
         bg_name = ""
+        slide_specs = []
+        if background_slides:
+            from .karaoke.slideshow import validate_starts
+            from .karaoke.background import BackgroundError, validate_background, probe_background
+            from .audio.video import probe_media
+            from .audio.io import AudioError
+
+            if background is not None:
+                raise S.ServiceError("单背景和多图背景不能同时提交")
+            try:
+                validate_starts([s[2] for s in background_slides], probe_media(media).get("duration_ms"))
+                for path, filename_i, start in background_slides:
+                    name_i = Path(filename_i).name
+                    with open(path, "rb") as f:
+                        kind = validate_background(name_i, f.read(64), path.stat().st_size)
+                    if kind != "image":
+                        raise BackgroundError("多图背景只支持静态图片")
+                    probe_background(path, kind)
+                    slide_specs.append(TaskBackgroundSlide(filename=name_i, start_ms=start))
+            except AudioError as e:
+                raise S.ServiceError(str(e)) from e
         if background is not None:
             from .karaoke.background import BackgroundError, probe_background, validate_background
 
@@ -423,7 +453,7 @@ class TaskQueue:
                 raise S.ServiceError(str(e)) from e
         t = PipelineTask(name=name.strip(), mode=mode, media_filename=safe, background_filename=bg_name,  # type: ignore[arg-type]
                          lyrics_kind="link" if is_music_link(lyrics) else "text", lyrics_input=lyrics,
-                         stages=task_stages(cfg.simple.calibration),
+                         stages=task_stages(cfg.simple.calibration), background_slides=slide_specs,
                          karaoke=karaoke, video=video, style_label=label, style_colors=colors,
                          processing=TaskProcessing(ai_provider=cfg.ai.provider, ai_model=cfg.ai.model,
                                                    ai_readings=cfg.ai.enabled, separate=cfg.simple.separate,
@@ -441,6 +471,10 @@ class TaskQueue:
         if background is not None:
             (dest / "background").mkdir(exist_ok=True)  # its own folder: the names may be the same
             shutil.move(str(background), dest / "background" / bg_name)
+        for i, (path, _, _) in enumerate(background_slides or []):
+            target = self.slide_path(t, i)
+            target.parent.mkdir(parents=True)
+            shutil.move(str(path), target)
         t.status, t.message = "preparing", "读取视频和歌词"
         with self._lock:
             self.tasks.append(t)
@@ -862,7 +896,7 @@ def stage_import(q, task, cfg, cancel, progress):
     if task.project_id:
         try:
             h = q.ws.get(task.project_id)
-            if h.project.asset("original") is not None:
+            if h.project.asset("original") is not None and (not task.background_slides or h.project.background_slides):
                 return "done"
         except Exception:
             task.project_id = None
@@ -883,6 +917,9 @@ def stage_import(q, task, cfg, cancel, progress):
     with open(src, "rb") as f:
         validate_upload(src.name, f.read(64), src.stat().st_size, 8 * 1024**3)
     S.add_media(h, src, "original", filename=task.media_filename)
+    if task.background_slides:
+        S.set_background_slides(h, [{"upload_index": i, "start_ms": s.start_ms} for i, s in enumerate(task.background_slides)],
+                                [(q.slide_path(task, i), s.filename) for i, s in enumerate(task.background_slides)])
     with h.lock:
         h.project.mode = task.mode
         h.save()
@@ -942,7 +979,7 @@ def stage_lyrics(q, task, cfg, cancel, progress):
         _warn(task, w)
     progress(0.7, "整理歌词与读音")
     S.apply_lyrics(h, pv["preview_id"])
-    if task.lyrics_kind == "link" and h.project.video is None and h.project.background is None:
+    if task.lyrics_kind == "link" and h.project.video is None and h.project.background is None and not h.project.background_slides:
         # audio only, no picture of its own: the song's cover, blurred behind it
         progress(0.75, "用歌曲封面做背景")
         try:

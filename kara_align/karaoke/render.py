@@ -168,7 +168,8 @@ def frame_size(video: Path, fallback: tuple[int, int]) -> tuple[int, int]:
 
 
 def preview_png(ass_text: str, t_ms: int, size: tuple[int, int], video: Optional[Path] = None,
-                audio_offset_s: float = 0.0, background: Optional[tuple[Path, str, Optional[int]]] = None) -> bytes:
+                audio_offset_s: float = 0.0, background: Optional[tuple[Path, str, Optional[int]]] = None,
+                slides: Optional[list[tuple[Path, int]]] = None) -> bytes:
     """One frame at audio time ``t_ms``: the video frame there, the background's (path, kind,
     duration_ms) frame there, or black."""
     w, h = size
@@ -179,7 +180,14 @@ def preview_png(ass_text: str, t_ms: int, size: tuple[int, int], video: Optional
         # the frame gets pts = t so the subtitles filter draws the state at t
         # millisecond timebase first: a 1 fps source would round t to whole seconds
         vf = f"settb=1/1000,setpts=PTS-STARTPTS+{t:.3f}/TB,{_subtitles_filter('k.ass')}"
-        if background is not None:
+        if slides:
+            from .slideshow import normalize_image
+
+            src = next(path for path, start in reversed(slides) if start <= max(0, t_ms))
+            normalized = Path(td, "slide.png")
+            normalize_image(src, normalized, size)
+            inp = ["-i", str(normalized)]
+        elif background is not None:
             from .background import cover_filter, input_args
 
             inp = input_args(background[0], background[1], at_s=t, duration_ms=background[2])  # type: ignore[arg-type]
@@ -200,7 +208,8 @@ def burn(ass_text: str, out_path: Path, size: tuple[int, int], duration_ms: int,
          video: Optional[Path] = None, audio: Optional[Path] = None, audio_offset_s: float = 0.0,
          use_video_audio: bool = False, quality: str = "standard", cancel=None,
          progress: Optional[Callable[[float, str], None]] = None,
-         background: Optional[tuple[Path, str]] = None) -> Path:
+         background: Optional[tuple[Path, str]] = None,
+         slides: Optional[list[tuple[Path, int]]] = None) -> Path:
     """Render subtitles into a video (the source video, a background, or black) of ``size``.
 
     ``size`` is the frame the subtitles were laid out for (their PlayRes, see frame_size());
@@ -224,7 +233,13 @@ def burn(ass_text: str, out_path: Path, size: tuple[int, int], duration_ms: int,
         Path(td, "k.ass").write_text(ass_text, encoding="utf-8")
         cmd = [ffmpeg_path(), "-v", "error", "-nostdin", "-y", "-progress", "pipe:1", "-nostats"]
         limit: list[str] = []
-        if background is not None:
+        if slides:
+            from .slideshow import concat_input
+
+            cmd += concat_input(slides, (w, h), duration_ms, Path(td), cancel)
+            vf = f"fps=30:start_time=0:round=up,setsar=1,{_subtitles_filter('k.ass')}"
+            limit = ["-t", f"{dur:.3f}"]
+        elif background is not None:
             from .background import cover_filter, input_args
 
             cmd += input_args(background[0], background[1])  # type: ignore[arg-type]

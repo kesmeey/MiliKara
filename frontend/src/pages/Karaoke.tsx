@@ -18,6 +18,7 @@ import {
   Badge, Button, Callout, Card, CardBody, CardHeader, EmptyState, Input, PageHeader, Progress, Segmented, Select, SliderField, Tip,
 } from '@/components/ui';
 import { StylePanel } from '@/components/karaoke/StylePanel';
+import { ProjectBackgroundSlides } from '@/components/karaoke/ProjectBackgroundSlides';
 import { BACKGROUND_ACCEPT } from '@/pages/input/AudioCard';
 import { setSimpleDefault } from '@/store/simple';
 import { countdownPlan } from '@/lib/countdown';
@@ -232,7 +233,7 @@ function Header() {
     <PageHeader
       eyebrow="第 8 步（可选）"
       title="卡拉OK字幕"
-      description="选择样式并预览任意时刻的画面；导出 ASS 字幕，或一键生成带字幕的视频（把字幕烧录进画面：背景图片 / 循环播放的背景视频、原视频或纯黑）。设置会自动保存；总是使用项目的当前对齐结果。"
+      description="选择样式并预览任意时刻的画面；导出 ASS 字幕，或一键生成带字幕的视频（单图 / 多图背景、循环背景视频、原视频或纯黑）。字幕样式自动保存，背景时间表编辑后需点击保存；总是使用项目的当前对齐结果。"
       actions={<Button onClick={() => setStep('export')} icon={<ArrowRight className="size-4" />}>下一步：导出</Button>}
     />
   );
@@ -389,12 +390,13 @@ function usePicture(): PictureInfo {
 }
 
 function pictureLabel(pic: PictureInfo): string {
+  if (pic.slides_count) return `多图背景（${pic.slides_count} 张）`;
   if (pic.source === 'background') return pic.kind === 'video' ? '背景视频（循环播放）' : '背景图片';
   return pic.source === 'video' ? '原视频画面' : '纯黑背景';
 }
 
 /** Choose / replace / remove the picture or looped video shown behind the subtitles. */
-function BackgroundControl({ pic }: { pic: PictureInfo }) {
+function BackgroundControl({ pic, onDirtyChange }: { pic: PictureInfo; onDirtyChange: (dirty: boolean) => void }) {
   const project = useProject()!;
   const input = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
@@ -422,7 +424,9 @@ function BackgroundControl({ pic }: { pic: PictureInfo }) {
   const bg = project.background;
   return (
     <div className="space-y-1.5 text-xs text-subtle">
-      {bg ? (
+      {project.background_slides?.length ? (
+        <div>已设置 {project.background_slides.length} 张图片，按下方时间表切换。</div>
+      ) : bg ? (
         <div className="flex min-w-0 items-center gap-1.5">
           <ImageIcon className="size-3.5 shrink-0" />
           <span className="min-w-0 truncate" title={bg.filename ?? ''}>{bg.filename}</span>
@@ -432,7 +436,7 @@ function BackgroundControl({ pic }: { pic: PictureInfo }) {
       )}
       <div className="flex flex-wrap gap-1.5">
         <Button size="xs" variant="outline" loading={busy} icon={<Upload className="size-3.5" />} onClick={() => input.current?.click()}>
-          {bg ? '更换背景' : '选择背景…'}
+          {project.background_slides?.length ? '改用单张图片 / 视频…' : bg ? '更换背景' : '选择背景…'}
         </Button>
         {hasCover && (
           <Button size="xs" variant="outline" loading={coverBusy} icon={<Disc3 className="size-3.5" />} onClick={() => void fromCover()}
@@ -440,12 +444,14 @@ function BackgroundControl({ pic }: { pic: PictureInfo }) {
             用歌曲封面
           </Button>
         )}
-        {bg && <Button size="xs" variant="ghost" icon={<Trash2 className="size-3.5" />} onClick={() => void remove()}>
+        {(bg || project.background_slides?.length) ? <Button size="xs" variant="ghost" disabled={busy || coverBusy} icon={<Trash2 className="size-3.5" />} onClick={() => void remove()}>
           移除{project.video ? '（回到原视频）' : ''}
-        </Button>}
+        </Button> : null}
       </div>
       <input ref={input} type="file" accept={BACKGROUND_ACCEPT} className="hidden" aria-label="选择背景文件"
         onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) void upload(f); }} />
+      <ProjectBackgroundSlides key={`${project.id}:${JSON.stringify(project.background_slides)}:${bg?.id ?? ''}`}
+        project={project} busy={busy || coverBusy} setBusy={setBusy} onDirtyChange={onDirtyChange} />
     </div>
   );
 }
@@ -459,6 +465,7 @@ function BurnCard({ style, patch, beforeBurn }: {
   const pic = usePicture();
   const job = useJob('burn');
   const [background, setBackground] = useState<'auto' | 'black'>('auto');
+  const [backgroundDirty, setBackgroundDirty] = useState(false);
   const [audio, setAudio] = useState<'original' | 'mix' | 'none'>('original');
   const [quality, setQuality] = useState<'standard' | 'high'>('standard');
   // the latest finished video of this project (kept after leaving the page)
@@ -487,13 +494,13 @@ function BurnCard({ style, patch, beforeBurn }: {
           <span className="text-xs text-muted">{pic.source === 'video' ? '时间已与原视频对齐（含音轨起点偏移）' : '时间从音频起点开始'}；使用当前结果和已保存的样式</span>
         </div>
 
-        <div className="grid gap-4 rounded-xl border border-line p-4 md:grid-cols-3">
-          <div className="space-y-1.5">
+        <div className="grid gap-4 rounded-xl border border-line p-4 md:grid-cols-2">
+          <div className="min-w-0 space-y-1.5 md:col-span-2">
             <div className="text-[13px] font-medium">背景</div>
             <Segmented size="sm" label="背景" value={pic.source !== 'black' ? background : 'black'} onChange={setBackground}
-              options={[{ value: 'auto', label: pic.source === 'background' ? (pic.kind === 'video' ? '背景视频' : '背景图片') : '原视频',
+              options={[{ value: 'auto', label: pic.source === 'background' ? pictureLabel(pic) : '原视频',
                 disabled: pic.source === 'black' }, { value: 'black', label: '纯黑' }]} />
-            <BackgroundControl pic={pic} />
+            <BackgroundControl pic={pic} onDirtyChange={setBackgroundDirty} />
           </div>
           <div className="space-y-1.5">
             <div className="text-[13px] font-medium">音频</div>
@@ -509,7 +516,7 @@ function BurnCard({ style, patch, beforeBurn }: {
             <Segmented size="sm" label="画质" value={quality} onChange={setQuality} options={[{ value: 'standard', label: '标准（较快）' }, { value: 'high', label: '高' }]} />
           </div>
           {audio === 'mix' && canMix && (
-            <div className="space-y-1.5 md:col-span-3">
+            <div className="space-y-1.5 md:col-span-2">
               <div className="text-[13px] font-medium">人声保留</div>
               <SliderField name="人声保留" value={vocalPct} onChange={setVocalPct} min={0} max={100} step={1} unit="%"
                 trackClassName="min-w-40" />
@@ -525,7 +532,8 @@ function BurnCard({ style, patch, beforeBurn }: {
               <span className="text-xs text-muted">{job!.message}</span>
             </div>
           )}
-          <Button variant="primary" onClick={start} loading={!!running} icon={<Flame className="size-4" />}>一键烧录（生成视频）</Button>
+          {backgroundDirty && <span className="text-xs text-warn">请先保存背景时间表，再生成视频</span>}
+          <Button variant="primary" onClick={start} disabled={backgroundDirty} loading={!!running} icon={<Flame className="size-4" />}>一键烧录（生成视频）</Button>
         </div>
         {job?.status === 'failed' && <Callout tone="danger" title="生成视频失败">{job.error ?? job.message}</Callout>}
         {out && (

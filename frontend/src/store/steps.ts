@@ -57,7 +57,8 @@ export function stepStatus(step: Step, pv: ProjectView | null, running: Set<stri
     }
     case 'karaoke':
       if (running.has('burn')) return { state: 'running', note: '生成视频中' };
-      return active ? { state: 'optional', note: p.video ? '字幕 · 生成带字幕的视频' : '字幕 · 纯黑背景视频' } : { state: 'todo', note: '需要对齐结果' };
+      return active ? { state: 'optional', note: p.background_slides?.length ? '字幕 · 多图背景视频'
+        : p.video || p.background ? '字幕 · 生成带字幕的视频' : '字幕 · 纯黑背景视频' } : { state: 'todo', note: '需要对齐结果' };
     case 'export':
       return { state: active ? 'todo' : 'todo', note: active ? '可导出' : undefined };
   }
